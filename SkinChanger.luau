@@ -1519,7 +1519,7 @@ i18n.capture = true
 
 local INFO_SOURCE = "解鎖與裝備都只存在你自己的客戶端，伺服器看不到，也不會存檔。\n重新進遊戲要再跑一次腳本。\n\n外觀沒出現的話：切換一次武器讓 ViewModel 重建。"
 local STATUS_SOURCE = "本腳本解鎖：%d 個外觀 · %d 把武器\n背包外觀總數：%d\n本地裝備：%d 把武器\nEquip 攔截：%s"
-local CREDITS_TEXT = "asphy¢ 、your dad:smallhuang\n\nEEZ rebuild"
+local CREDITS_TEXT = "asphy¢ 、your dad:xxxx\n\nEEZ rebuild"
 
 local Window = Library:CreateWindow({
     Title = "Rivals · Skin Changer",
