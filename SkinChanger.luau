@@ -63,7 +63,7 @@ local REPORT_SECRET = "a07e18c7510588f04dea5774077d7d434bdcc864c3a1f1e4"
 local LICENSE_GATE_ENABLED = true
 
 -- 見上面說明：第一次正式啟用封鎖前，先留 true 觀察有沒有誤判。
-local ANTIHOOK_DRY_RUN = true
+local ANTIHOOK_DRY_RUN = false
 
 local function ScanForHooks()
     local reasons = {}
