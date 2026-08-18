@@ -63,6 +63,7 @@ local function CandidateGlobals()
         checkcaller        = checkcaller,
         getnamecallmethod  = getnamecallmethod,
         loadstring         = loadstring,
+        require            = require,
         request            = (type(request) == "function" and request)
             or (type(http) == "table" and http.request),
     }
@@ -78,6 +79,26 @@ local KNOWN_DUMPER_MARKERS = {
     "ScriptDumper",
 }
 
+--[[
+    已知盲區（不是 bug，是這個手法的物理極限，記錄下來避免自己忘記）：
+
+    有人拿 hookfunction(loadstring, ...) 這種方式去 hook loadstring 本身，
+    藉此在你的腳本被編譯執行「之前」把明文源碼 dump 走。這個盲區有兩層：
+
+    1. 如果執行器的 hookfunction 實作是「隱蔽型」的（某些執行器故意設計成
+       這樣，就是為了讓 iscclosure() 檢查看不出來），iscclosure(loadstring)
+       在被 hook 之後可能還是回傳 true——這種情況下面的檢查完全看不出來，
+       沒有 userland 解法。
+    2. 就算 hookfunction 沒有隱蔽、iscclosure 會正確翻成 false，攻擊者的
+       hook 腳本本來就是在你的腳本開始執行「之前」跑的（auto-execute），
+       而你的腳本要先被那個（已經被 hook 的）loadstring 編譯出來，這份
+       檢查程式碼才有機會開始執行——換句話說，dump 動作發生在這份檢查碼
+       跑起來之前，抓到了也於事無補，源碼已經外洩了。
+
+    這是為什麼下面的說明反覆強調「這是嚇阻，不是絕對防護」，以及為什麼
+    真正該做的是把要發布的腳本用 Prometheus 之類的工具混淆過再上架，而不是
+    只靠這份執行期檢查。
+]]
 local function CheckCClosures(reasons)
     if type(iscclosure) ~= "function" then
         -- 這個執行器沒給 iscclosure，這項檢查直接跳過（不算失敗，只是做不了）

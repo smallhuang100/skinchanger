@@ -63,7 +63,7 @@ local REPORT_SECRET = "a07e18c7510588f04dea5774077d7d434bdcc864c3a1f1e4"
 local LICENSE_GATE_ENABLED = true
 
 -- 見上面說明：第一次正式啟用封鎖前，先留 true 觀察有沒有誤判。
-local ANTIHOOK_DRY_RUN = false
+local ANTIHOOK_DRY_RUN = true
 
 local function ScanForHooks()
     local reasons = {}
@@ -78,6 +78,7 @@ local function ScanForHooks()
             checkcaller        = checkcaller,
             getnamecallmethod  = getnamecallmethod,
             loadstring         = loadstring,
+            require            = require,
             request            = (type(request) == "function" and request)
                 or (type(http) == "table" and http.request),
         }
@@ -1699,7 +1700,7 @@ i18n.capture = true
 
 local INFO_SOURCE = "解鎖與裝備都只存在你自己的客戶端，伺服器看不到，也不會存檔。\n重新進遊戲要再跑一次腳本。\n\n外觀沒出現的話：切換一次武器讓 ViewModel 重建。"
 local STATUS_SOURCE = "本腳本解鎖：%d 個外觀 · %d 把武器\n背包外觀總數：%d\n本地裝備：%d 把武器\nEquip 攔截：%s"
-local CREDITS_TEXT = "asphy¢ 、your dad:smallhuang\n\nsmallhuang help for translate"
+local CREDITS_TEXT = "asphy¢ 、your dad:smallhuang\n\nSB林承恩，沒想到這裡也有我吧"
 
 local Window = Library:CreateWindow({
     Title = "Rivals · Skin Changer",
