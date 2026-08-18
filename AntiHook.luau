@@ -63,9 +63,13 @@ local function CandidateGlobals()
         checkcaller        = checkcaller,
         getnamecallmethod  = getnamecallmethod,
         loadstring         = loadstring,
-        require            = require,
         request            = (type(request) == "function" and request)
             or (type(http) == "table" and http.request),
+        -- 注意：require 故意沒放進來。實測過 Real 執行器 + RIVALS 這個組合，
+        -- 乾淨環境下 iscclosure(require) 本來就回傳 false（require 天生是
+        -- Lua 實作，不是 C closure），放進來只會製造保證會觸發的假警報。
+        -- 這是實測結果，不是猜測——想加回來之前，先在你自己的環境測過
+        -- 乾淨基準值，不要直接信任何清單。
     }
 end
 
@@ -80,24 +84,32 @@ local KNOWN_DUMPER_MARKERS = {
 }
 
 --[[
-    已知盲區（不是 bug，是這個手法的物理極限，記錄下來避免自己忘記）：
+    已知盲區 —— 這段不是理論推測，是實際拿 Real 執行器（連 RIVALS 這個
+    遊戲一起測）跑出來的結果，測法是：
 
-    有人拿 hookfunction(loadstring, ...) 這種方式去 hook loadstring 本身，
-    藉此在你的腳本被編譯執行「之前」把明文源碼 dump 走。這個盲區有兩層：
+        local orig = loadstring
+        hookfunction(loadstring, function(code, chunkname) return orig(code, chunkname) end)
+        print(iscclosure(loadstring)) --> true（實測結果，不是假設）
 
-    1. 如果執行器的 hookfunction 實作是「隱蔽型」的（某些執行器故意設計成
-       這樣，就是為了讓 iscclosure() 檢查看不出來），iscclosure(loadstring)
-       在被 hook 之後可能還是回傳 true——這種情況下面的檢查完全看不出來，
-       沒有 userland 解法。
-    2. 就算 hookfunction 沒有隱蔽、iscclosure 會正確翻成 false，攻擊者的
-       hook 腳本本來就是在你的腳本開始執行「之前」跑的（auto-execute），
-       而你的腳本要先被那個（已經被 hook 的）loadstring 編譯出來，這份
-       檢查程式碼才有機會開始執行——換句話說，dump 動作發生在這份檢查碼
-       跑起來之前，抓到了也於事無補，源碼已經外洩了。
+        local orig2
+        orig2 = hookmetamethod(game, "__namecall", function(self, ...) return orig2(self, ...) end)
+        print(iscclosure(getrawmetatable(game).__namecall)) --> true（實測結果）
 
-    這是為什麼下面的說明反覆強調「這是嚇阻，不是絕對防護」，以及為什麼
-    真正該做的是把要發布的腳本用 Prometheus 之類的工具混淆過再上架，而不是
-    只靠這份執行期檢查。
+    兩個都印出 true。也就是說：Real 上用 hookfunction 或 hookmetamethod
+    掛的 hook，iscclosure() 完全看不出來——不管掛的是 loadstring、
+    __namecall、還是任何其他函式。這代表下面這整套 CheckCClosures 邏輯，
+    對任何用「正規」方式（hookfunction / hookmetamethod）做的 hook 都是
+    瞎的，只抓得到直接裸露覆蓋全域變數（不透過 hookfunction，例如
+    `checkcaller = function(...) end`）這種懶得包裝的粗糙手法——這種
+    確實測得出來，但任何有基本水準的 hook 工具都不會這樣寫，正是因為
+    hookfunction 存在的意義就是拿來閃這種檢查的。
+
+    debug.getinfo(loadstring).what 也試過，一樣回報 "C"，看不穿偽裝。
+
+    結論：這份掃描對「認真做的 hook」沒有實際防護力，只對外行的粗糙手法
+    有效。真正該花力氣的地方是把要發布的腳本用 Prometheus 之類的工具
+    混淆過再上架——那個是無論 hook 偵不偵測得到都有效的防線，這份執行期
+    檢查頂多算多一層嚇阻，不要當成主力防護在依賴。
 ]]
 local function CheckCClosures(reasons)
     if type(iscclosure) ~= "function" then
