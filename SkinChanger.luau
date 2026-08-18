@@ -1244,8 +1244,282 @@ if #weapon_values == 0 then
 end
 
 --=============================================================================
--- 13. UI
+-- 13. 語言 (i18n)
+--
+--    做法：函式庫裡每一個文字元件最後都會走到 Library:CreateLabel / Library:Create，
+--    所以在建 UI 之前先把這兩個函式包起來，把「元件 + 當初寫進去的字串」記下來。
+--    切語言時就照著這份清單原地改 .Text，不用重建整個 UI，狀態也不會掉。
 --=============================================================================
+
+local LANG_FILE = "RivalsSkinChanger/lang.txt"
+
+local i18n = {
+    lang = "zh",
+    tracked = {},  -- { inst, prop, key, last }
+    buttons = {},  -- Button 物件另外記，DoubleClick 會用 Button.Text 還原文字
+    capture = false,
+}
+
+-- 先宣告，實際的函式在 UI 建完之後才指定（要等 InfoLabel 之類的元件都存在）。
+-- 因為是同一個 local 變數，下面的按鈕 callback 現在就能直接參照它。
+local SetLanguage
+
+-- 每一列是 { 中文, English }。兩個方向都會註冊進查表，
+-- 所以不管原始碼裡寫的是中文（我們自己的 UI）還是英文（SaveManager /
+-- ThemeManager 那些 addon），查得到就換得掉。
+local TRANSLATION_PAIRS = {
+    -- 分頁
+    { "解鎖",         "Unlocker" },
+    { "裝備",         "Equip" },
+    { "設定",         "Settings" },
+
+    -- 群組標題
+    { "一鍵解鎖",     "Quick Unlock" },
+    { "批次解鎖",     "Batch Unlock" },
+    { "指定項目",     "Specific" },
+    { "狀態",         "Status" },
+    { "裝備外觀",     "Equip Cosmetic" },
+    { "目前本地裝備", "Local Loadout" },
+    { "選單",         "Menu" },
+    { "說明",         "About" },
+    { "作者",         "Credits" },
+
+    -- 按鈕
+    { "解鎖全部（外觀 + 武器）",     "Unlock Everything" },
+    { "全部鎖回去",                  "Lock Everything" },
+    { "解鎖全部外觀",                "Unlock All Cosmetics" },
+    { "鎖回全部外觀",                "Lock All Cosmetics" },
+    { "解鎖全部武器",                "Unlock All Weapons" },
+    { "鎖回全部武器",                "Lock All Weapons" },
+    { "解鎖此類型全部",              "Unlock All of Type" },
+    { "鎖回此類型",                  "Lock All of Type" },
+    { "解鎖此稀有度全部",            "Unlock Selected Rarity" },
+    { "鎖回此稀有度",                "Lock Selected Rarity" },
+    { "解鎖選取的外觀",              "Unlock Selected" },
+    { "鎖回",                        "Lock" },
+    { "解鎖這把武器",                "Unlock This Weapon" },
+    { "鎖回這把武器",                "Lock This Weapon" },
+    { "解鎖這把武器的所有外觀",      "Unlock All for Weapon" },
+    { "套用",                        "Apply" },
+    { "套用到所有武器",              "Apply to All Weapons" },
+    { "卸下這把武器的這個欄位",      "Unequip This Slot" },
+    { "全部清空",                    "Clear All" },
+    { "卸載腳本",                    "Unload Script" },
+
+    -- 開關
+    { "腳本載入時自動全解鎖",   "Auto unlock on load" },
+    { "攔截裝備請求（本地套用）", "Intercept equip (client-side)" },
+    { "包裝反轉 (Inverted)",     "Inverted wrap" },
+    { "Random 只從最愛裡挑",     "Random uses favorites only" },
+    { "顯示浮水印",              "Show watermark" },
+
+    -- 下拉選單 / 輸入框
+    { "類型",           "Type" },
+    { "稀有度",         "Rarity" },
+    { "武器",           "Weapon" },
+    { "搜尋",           "Search" },
+    { "外觀",           "Cosmetic" },
+    { "開關選單",       "Menu toggle" },
+    { "選單快捷鍵",     "Menu keybind" },
+    { "關鍵字後按 Enter", "keyword, then Enter" },
+
+    -- 提示 (tooltip)
+    { "全皮膚、全包裝、全吊飾、全終結技，外加所有可擁有的武器",
+      "Every skin, wrap, charm and finisher, plus all ownable weapons" },
+    { "只會移除本腳本加上去的，你真正擁有的東西不會被動到（要點兩下）",
+      "Only removes what this script added; real ownership is untouched (double-click)" },
+    { "配合 Settings 分頁的 autoload 設定檔，下次執行就會自動解鎖",
+      "Pair with an autoload config so the next run unlocks by itself" },
+    { "皮膚會依這把武器過濾；包裝 / 吊飾 / 終結技是通用的",
+      "Skins are filtered by this weapon; wraps / charms / finishers are universal" },
+    { "關掉的話裝備會照常送去伺服器，沒真的擁有就會被打回來",
+      "Turn off and equips go to the server, which rejects anything you don't own" },
+    { "None = 卸下，Random = 每次生成隨機挑一個",
+      "None = unequip, Random = re-rolls every time the weapon spawns" },
+    { "還原所有 hook 並關閉 UI（要點兩下）",
+      "Restore every hook and close the UI (double-click)" },
+
+    -- 說明文字
+    { "解鎖與裝備都只存在你自己的客戶端，伺服器看不到，也不會存檔。\n重新進遊戲要再跑一次腳本。\n\n外觀沒出現的話：切換一次武器讓 ViewModel 重建。",
+      "Unlocks and equips exist only on your client. The server never sees them and nothing is saved.\nRe-run the script after rejoining.\n\nCosmetic not showing? Switch weapons once to rebuild the ViewModel." },
+
+    -- 動態文字
+    { "讀取中...",   "Loading..." },
+    { "（空）",      "(empty)" },
+    { "清單：--",    "List: --" },
+    { "清單：%d 個", "List: %d" },
+    { "清單：顯示 %d / 符合 %d（用搜尋縮小範圍）",
+      "List: showing %d of %d (use search to narrow)" },
+    { "...還有 %d 把", "...and %d more" },
+    { "本腳本解鎖：%d 個外觀 · %d 把武器\n背包外觀總數：%d\n本地裝備：%d 把武器\nEquip 攔截：%s",
+      "Unlocked by script: %d cosmetics, %d weapons\nCosmetics in inventory: %d\nLocal loadout: %d weapons\nEquip intercept: %s" },
+    { "開啟", "on" },
+    { "關閉", "off" },
+
+    -- 通知
+    { "解鎖完成：%d 個外觀、%d 把武器", "Unlocked %d cosmetics and %d weapons" },
+    { "已移除：%d 個外觀、%d 把武器",   "Removed %d cosmetics and %d weapons" },
+    { "自動解鎖：%d 個外觀、%d 把武器", "Auto-unlocked %d cosmetics and %d weapons" },
+    { "解鎖了 %d 個外觀",  "Unlocked %d cosmetics" },
+    { "移除了 %d 個外觀",  "Removed %d cosmetics" },
+    { "解鎖了 %d 把武器",  "Unlocked %d weapons" },
+    { "移除了 %d 把武器",  "Removed %d weapons" },
+    { "%s：解鎖 %d 個",    "%s: unlocked %d" },
+    { "%s：移除 %d 個",    "%s: removed %d" },
+    { "%s：解鎖 %d 個外觀", "%s: unlocked %d cosmetics" },
+    { "%s：移除 %d 個外觀", "%s: removed %d cosmetics" },
+    { "找不到這個外觀",     "No such cosmetic" },
+    { "已解鎖 %s",          "Unlocked %s" },
+    { "已移除 %s",          "Removed %s" },
+    { "你本來就有 %s",      "You already own %s" },
+    { "這個不是假的，沒有動它", "That one is real, left untouched" },
+    { "你本來就有這把，或名稱無效", "You already own it, or the name is invalid" },
+    { "這把不是假的",       "That weapon is real, left untouched" },
+    { "已套用到 %s",        "Applied to %s" },
+    { "已套用到 %d 把武器", "Applied to %d weapons" },
+    { "%s 的 %s 已卸下",    "Unequipped %s on %s" },
+    { "失敗：%s",           "Failed: %s" },
+    { "沒有選武器",         "No weapon selected" },
+    { "找不到 EquipCosmetic remote", "EquipCosmetic remote not found" },
+    { "ItemLibrary 不可用",  "ItemLibrary unavailable" },
+    { "皮膚綁定單一武器，不能套用到全部",
+      "Skins are bound to one weapon and cannot be applied to all" },
+    { "本地裝備已清空，重生一次就會恢復原樣",
+      "Local loadout cleared; respawn to see the originals" },
+    { "Rivals Skin Changer 載入完成 · 按 End 開關選單",
+      "Rivals Skin Changer loaded - press End to toggle the menu" },
+
+    -- SaveManager / ThemeManager（原始碼是英文，這裡補中文）
+    { "設定檔",         "Configuration" },
+    { "設定檔名稱",     "Config name" },
+    { "設定檔清單",     "Config list" },
+    { "建立設定檔",     "Create config" },
+    { "覆蓋設定檔",     "Overwrite config" },
+    { "載入設定檔",     "Load config" },
+    { "重新整理清單",   "Refresh list" },
+    { "設為自動載入",   "Set as autoload" },
+    { "主題",           "Themes" },
+    { "背景色",         "Background color" },
+    { "主色",           "Main color" },
+    { "強調色",         "Accent color" },
+    { "外框色",         "Outline color" },
+    { "文字色",         "Font color" },
+    { "主題清單",       "Theme list" },
+    { "設為預設",       "Set as default" },
+    { "自訂主題名稱",   "Custom theme name" },
+    { "自訂主題",       "Custom themes" },
+    { "儲存主題",       "Save theme" },
+}
+
+local TR = {}
+for _, pair in ipairs(TRANSLATION_PAIRS) do
+    local entry = { zh = pair[1], en = pair[2] }
+    TR[pair[1]] = entry
+    TR[pair[2]] = entry
+end
+
+-- 查不到就原字回傳，所以遊戲資料（武器名、外觀名）不會被亂翻
+local function T(source)
+    local entry = TR[source]
+    if not entry then return source end
+    return entry[i18n.lang] or source
+end
+
+-- 建 UI 期間攔截文字元件的建立，把它們記下來。
+-- 呼叫端傳進來的已經是 T() 翻好的字串（這樣函式庫算文字寬度才會算對），
+-- 這裡只負責登記；因為查表是雙向的，記中文或英文都查得回同一筆。
+do
+    local orig_create_label = Library.CreateLabel
+    Library.CreateLabel = function(self, properties, is_hud)
+        local inst = orig_create_label(self, properties, is_hud)
+
+        if i18n.capture and type(properties) == "table" and type(properties.Text) == "string" then
+            table.insert(i18n.tracked, {
+                inst = inst,
+                prop = "Text",
+                key  = properties.Text,
+                last = properties.Text,
+            })
+        end
+
+        return inst
+    end
+
+    local orig_create = Library.Create
+    Library.Create = function(self, class, properties)
+        local inst = orig_create(self, class, properties)
+
+        if i18n.capture and type(properties) == "table"
+            and type(properties.PlaceholderText) == "string"
+            and properties.PlaceholderText ~= "" then
+
+            table.insert(i18n.tracked, {
+                inst = inst,
+                prop = "PlaceholderText",
+                key  = properties.PlaceholderText,
+                last = properties.PlaceholderText,
+            })
+        end
+
+        return inst
+    end
+
+    -- 提示框的大小是照文字算出來的，換語言後要重算，所以要認得出哪些是提示框
+    local orig_tooltip = Library.AddToolTip
+    Library.AddToolTip = function(self, info, hover)
+        local before = #i18n.tracked
+        local result = orig_tooltip(self, info, hover)
+
+        for i = before + 1, #i18n.tracked do
+            i18n.tracked[i].tooltip = true
+        end
+
+        return result
+    end
+end
+
+-- 建立按鈕並登記。DoubleClick 還原文字時讀的是 Button.Text，那個欄位也要換。
+local function AddBtn(target, options)
+    local button = target:AddButton(options)
+    table.insert(i18n.buttons, { button = button, key = options.Text })
+    return button
+end
+
+local function ReadSavedLanguage()
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then return nil end
+
+    local ok, exists = pcall(isfile, LANG_FILE)
+    if not ok or not exists then return nil end
+
+    local ok2, content = pcall(readfile, LANG_FILE)
+    if not ok2 or type(content) ~= "string" then return nil end
+
+    content = content:gsub("%s", "")
+    return (content == "en" or content == "zh") and content or nil
+end
+
+local function SaveLanguage()
+    if type(writefile) ~= "function" then return end
+
+    pcall(function()
+        if type(makefolder) == "function" and type(isfolder) == "function"
+            and not isfolder("RivalsSkinChanger") then
+            makefolder("RivalsSkinChanger")
+        end
+        writefile(LANG_FILE, i18n.lang)
+    end)
+end
+
+i18n.lang = ReadSavedLanguage() or "zh"
+i18n.capture = true
+
+--=============================================================================
+-- 14. UI
+--=============================================================================
+
+local INFO_SOURCE = "解鎖與裝備都只存在你自己的客戶端，伺服器看不到，也不會存檔。\n重新進遊戲要再跑一次腳本。\n\n外觀沒出現的話：切換一次武器讓 ViewModel 重建。"
+local STATUS_SOURCE = "本腳本解鎖：%d 個外觀 · %d 把武器\n背包外觀總數：%d\n本地裝備：%d 把武器\nEquip 攔截：%s"
+local CREDITS_TEXT = "asphy¢ 、your dad:smallhuang\n\nSB林承恩，沒想到這裡也有我吧"
 
 local Window = Library:CreateWindow({
     Title = "Rivals · Skin Changer",
@@ -1257,254 +1531,272 @@ local Window = Library:CreateWindow({
     Size = UDim2.fromOffset(620, 620),
 })
 
+-- 分頁按鈕的寬度是照文字算的，換語言要連按鈕框一起 resize，
+-- 所以包一層記下「這個 label 的 parent 是哪個分頁按鈕」。
+do
+    local orig_add_tab = Window.AddTab
+    Window.AddTab = function(self, name)
+        local before = #i18n.tracked
+        local tab = orig_add_tab(self, name)
+
+        for i = before + 1, #i18n.tracked do
+            i18n.tracked[i].tab_button = true
+        end
+
+        return tab
+    end
+end
+
 local Tabs = {
-    Unlocker = Window:AddTab("Unlocker"),
-    Equip    = Window:AddTab("Equip"),
-    Settings = Window:AddTab("Settings"),
+    Unlocker = Window:AddTab(T("Unlocker")),
+    Equip    = Window:AddTab(T("Equip")),
+    Settings = Window:AddTab(T("Settings")),
 }
 
 --------------------------------------------------------------------------- 一鍵
-local QuickBox = Tabs.Unlocker:AddLeftGroupbox("一鍵解鎖")
+local QuickBox = Tabs.Unlocker:AddLeftGroupbox(T("一鍵解鎖"))
 
-QuickBox:AddButton({
-    Text = "解鎖全部（外觀 + 武器）",
-    Tooltip = "全皮膚、全包裝、全吊飾、全終結技，外加所有可擁有的武器",
+AddBtn(AddBtn(QuickBox, {
+    Text = T("解鎖全部（外觀 + 武器）"),
+    Tooltip = T("全皮膚、全包裝、全吊飾、全終結技，外加所有可擁有的武器"),
     Func = function()
         local cosmetics = UnlockAllCosmetics(true)
         local weapons = UnlockAllWeapons()
-        Library:Notify(("解鎖完成：%d 個外觀、%d 把武器"):format(cosmetics, weapons), 5)
+        Library:Notify(T("解鎖完成：%d 個外觀、%d 把武器"):format(cosmetics, weapons), 5)
     end,
-}):AddButton({
-    Text = "全部鎖回去",
+}), {
+    Text = T("全部鎖回去"),
     DoubleClick = true,
-    Tooltip = "只會移除本腳本加上去的，你真正擁有的東西不會被動到（要點兩下）",
+    Tooltip = T("只會移除本腳本加上去的，你真正擁有的東西不會被動到（要點兩下）"),
     Func = function()
         local cosmetics = UnlockAllCosmetics(false)
         local weapons = LockAllWeapons()
-        Library:Notify(("已移除：%d 個外觀、%d 把武器"):format(cosmetics, weapons), 5)
+        Library:Notify(T("已移除：%d 個外觀、%d 把武器"):format(cosmetics, weapons), 5)
     end,
 })
 
 QuickBox:AddDivider()
 
-QuickBox:AddButton({
-    Text = "解鎖全部外觀",
+AddBtn(AddBtn(QuickBox, {
+    Text = T("解鎖全部外觀"),
     Func = function()
-        Library:Notify(("解鎖了 %d 個外觀"):format(UnlockAllCosmetics(true)), 5)
+        Library:Notify(T("解鎖了 %d 個外觀"):format(UnlockAllCosmetics(true)), 5)
     end,
-}):AddButton({
-    Text = "鎖回全部外觀",
+}), {
+    Text = T("鎖回全部外觀"),
     DoubleClick = true,
     Func = function()
-        Library:Notify(("移除了 %d 個外觀"):format(UnlockAllCosmetics(false)), 5)
+        Library:Notify(T("移除了 %d 個外觀"):format(UnlockAllCosmetics(false)), 5)
     end,
 })
 
-QuickBox:AddButton({
-    Text = "解鎖全部武器",
+AddBtn(AddBtn(QuickBox, {
+    Text = T("解鎖全部武器"),
     Func = function()
-        Library:Notify(("解鎖了 %d 把武器"):format(UnlockAllWeapons()), 5)
+        Library:Notify(T("解鎖了 %d 把武器"):format(UnlockAllWeapons()), 5)
     end,
-}):AddButton({
-    Text = "鎖回全部武器",
+}), {
+    Text = T("鎖回全部武器"),
     DoubleClick = true,
     Func = function()
-        Library:Notify(("移除了 %d 把武器"):format(LockAllWeapons()), 5)
+        Library:Notify(T("移除了 %d 把武器"):format(LockAllWeapons()), 5)
     end,
 })
 
 QuickBox:AddDivider()
 
 QuickBox:AddToggle("AutoUnlock", {
-    Text = "腳本載入時自動全解鎖",
+    Text = T("腳本載入時自動全解鎖"),
     Default = false,
-    Tooltip = "配合 Settings 分頁的 autoload 設定檔，下次執行就會自動解鎖",
+    Tooltip = T("配合 Settings 分頁的 autoload 設定檔，下次執行就會自動解鎖"),
 })
 
 --------------------------------------------------------------- 依類型 / 稀有度
-local BatchBox = Tabs.Unlocker:AddLeftGroupbox("批次解鎖")
+local BatchBox = Tabs.Unlocker:AddLeftGroupbox(T("批次解鎖"))
 
 BatchBox:AddDropdown("UnlockTypeSel", {
-    Text = "類型",
+    Text = T("類型"),
     Values = COSMETIC_TYPES,
     Default = 1,
 })
 
-BatchBox:AddButton({
-    Text = "解鎖此類型全部",
+AddBtn(AddBtn(BatchBox, {
+    Text = T("解鎖此類型全部"),
     Func = function()
         local n = UnlockType(state.unlocker.type, true)
-        Library:Notify(("%s：解鎖 %d 個"):format(state.unlocker.type, n), 5)
+        Library:Notify(T("%s：解鎖 %d 個"):format(state.unlocker.type, n), 5)
     end,
-}):AddButton({
-    Text = "鎖回此類型",
+}), {
+    Text = T("鎖回此類型"),
     DoubleClick = true,
     Func = function()
         local n = UnlockType(state.unlocker.type, false)
-        Library:Notify(("%s：移除 %d 個"):format(state.unlocker.type, n), 5)
+        Library:Notify(T("%s：移除 %d 個"):format(state.unlocker.type, n), 5)
     end,
 })
 
 BatchBox:AddDropdown("UnlockRaritySel", {
-    Text = "稀有度",
+    Text = T("稀有度"),
     Values = COSMETIC_RARITIES,
     Default = 1,
 })
 
-BatchBox:AddButton({
-    Text = "解鎖此稀有度全部",
+AddBtn(AddBtn(BatchBox, {
+    Text = T("解鎖此稀有度全部"),
     Func = function()
         local n = UnlockRarity(state.unlocker.rarity, true)
-        Library:Notify(("%s：解鎖 %d 個"):format(state.unlocker.rarity, n), 5)
+        Library:Notify(T("%s：解鎖 %d 個"):format(state.unlocker.rarity, n), 5)
     end,
-}):AddButton({
-    Text = "鎖回此稀有度",
+}), {
+    Text = T("鎖回此稀有度"),
     DoubleClick = true,
     Func = function()
         local n = UnlockRarity(state.unlocker.rarity, false)
-        Library:Notify(("%s：移除 %d 個"):format(state.unlocker.rarity, n), 5)
+        Library:Notify(T("%s：移除 %d 個"):format(state.unlocker.rarity, n), 5)
     end,
 })
 
 --------------------------------------------------------------------- 指定項目
-local SpecificBox = Tabs.Unlocker:AddRightGroupbox("指定項目")
+local SpecificBox = Tabs.Unlocker:AddRightGroupbox(T("指定項目"))
 
 SpecificBox:AddDropdown("SpecWeapon", {
-    Text = "武器",
+    Text = T("武器"),
     Values = weapon_values,
     Default = 1,
-    Tooltip = "皮膚會依這把武器過濾；包裝 / 吊飾 / 終結技是通用的",
+    Tooltip = T("皮膚會依這把武器過濾；包裝 / 吊飾 / 終結技是通用的"),
 })
 
 SpecificBox:AddInput("SpecSearch", {
-    Text = "搜尋",
+    Text = T("搜尋"),
     Default = "",
     Finished = true, -- 每打一個字就重建 150 個按鈕會卡，改成按 Enter 才套用
-    Placeholder = "關鍵字後按 Enter",
+    Placeholder = T("關鍵字後按 Enter"),
 })
 
 SpecificBox:AddDropdown("SpecCosmetic", {
-    Text = "外觀",
+    Text = T("外觀"),
     Values = { "" },
     Default = 1,
 })
 
-local SpecCountLabel = SpecificBox:AddLabel("清單：--")
+local SpecCountLabel = SpecificBox:AddLabel(T("清單：--"))
 
-SpecificBox:AddButton({
-    Text = "解鎖選取的外觀",
+AddBtn(AddBtn(SpecificBox, {
+    Text = T("解鎖選取的外觀"),
     Func = function()
         local found, changed = UnlockSpecific(
             state.unlocker.type, state.unlocker.cosmetic, state.unlocker.weapon, true)
 
         if not found then
-            Library:Notify("找不到這個外觀", 5)
+            Library:Notify(T("找不到這個外觀"), 5)
         elseif changed then
-            Library:Notify("已解鎖 " .. state.unlocker.cosmetic, 5)
+            Library:Notify(T("已解鎖 %s"):format(state.unlocker.cosmetic), 5)
         else
-            Library:Notify("你本來就有 " .. state.unlocker.cosmetic, 5)
+            Library:Notify(T("你本來就有 %s"):format(state.unlocker.cosmetic), 5)
         end
     end,
-}):AddButton({
-    Text = "鎖回",
+}), {
+    Text = T("鎖回"),
     Func = function()
         local found, changed = UnlockSpecific(
             state.unlocker.type, state.unlocker.cosmetic, state.unlocker.weapon, false)
 
         if not found then
-            Library:Notify("找不到這個外觀", 5)
+            Library:Notify(T("找不到這個外觀"), 5)
         elseif changed then
-            Library:Notify("已移除 " .. state.unlocker.cosmetic, 5)
+            Library:Notify(T("已移除 %s"):format(state.unlocker.cosmetic), 5)
         else
-            Library:Notify("這個不是假的，沒有動它", 5)
+            Library:Notify(T("這個不是假的，沒有動它"), 5)
         end
     end,
 })
 
 SpecificBox:AddDivider()
 
-SpecificBox:AddButton({
-    Text = "解鎖這把武器",
+AddBtn(AddBtn(SpecificBox, {
+    Text = T("解鎖這把武器"),
     Func = function()
         local ok = UnlockWeapon(state.unlocker.weapon)
-        Library:Notify(ok and ("已解鎖 " .. state.unlocker.weapon) or "你本來就有這把，或名稱無效", 5)
+        Library:Notify(ok and T("已解鎖 %s"):format(state.unlocker.weapon)
+            or T("你本來就有這把，或名稱無效"), 5)
     end,
-}):AddButton({
-    Text = "鎖回這把武器",
+}), {
+    Text = T("鎖回這把武器"),
     Func = function()
         local ok = LockWeapon(state.unlocker.weapon)
-        Library:Notify(ok and ("已移除 " .. state.unlocker.weapon) or "這把不是假的", 5)
+        Library:Notify(ok and T("已移除 %s"):format(state.unlocker.weapon)
+            or T("這把不是假的"), 5)
     end,
 })
 
-SpecificBox:AddButton({
-    Text = "解鎖這把武器的所有外觀",
+AddBtn(AddBtn(SpecificBox, {
+    Text = T("解鎖這把武器的所有外觀"),
     Func = function()
         local n = UnlockAllForWeapon(state.unlocker.weapon, true)
-        Library:Notify(("%s：解鎖 %d 個外觀"):format(state.unlocker.weapon, n), 5)
+        Library:Notify(T("%s：解鎖 %d 個外觀"):format(state.unlocker.weapon, n), 5)
     end,
-}):AddButton({
-    Text = "鎖回",
+}), {
+    Text = T("鎖回"),
     DoubleClick = true,
     Func = function()
         local n = UnlockAllForWeapon(state.unlocker.weapon, false)
-        Library:Notify(("%s：移除 %d 個外觀"):format(state.unlocker.weapon, n), 5)
+        Library:Notify(T("%s：移除 %d 個外觀"):format(state.unlocker.weapon, n), 5)
     end,
 })
 
 ------------------------------------------------------------------------- 狀態
-local StatusBox = Tabs.Unlocker:AddRightGroupbox("狀態")
-local StatusLabel = StatusBox:AddLabel("讀取中...", true)
+local StatusBox = Tabs.Unlocker:AddRightGroupbox(T("狀態"))
+local StatusLabel = StatusBox:AddLabel(T("讀取中..."), true)
 
 --------------------------------------------------------------------- Equip 分頁
-local EquipBox = Tabs.Equip:AddLeftGroupbox("裝備外觀")
+local EquipBox = Tabs.Equip:AddLeftGroupbox(T("裝備外觀"))
 
 EquipBox:AddToggle("InterceptEquip", {
-    Text = "攔截裝備請求（本地套用）",
+    Text = T("攔截裝備請求（本地套用）"),
     Default = true,
-    Tooltip = "關掉的話裝備會照常送去伺服器，沒真的擁有就會被打回來",
+    Tooltip = T("關掉的話裝備會照常送去伺服器，沒真的擁有就會被打回來"),
 })
 
 EquipBox:AddDropdown("EquipTypeSel", {
-    Text = "類型",
+    Text = T("類型"),
     Values = COSMETIC_TYPES,
     Default = 1,
 })
 
 EquipBox:AddDropdown("EquipWeapon", {
-    Text = "武器",
+    Text = T("武器"),
     Values = weapon_values,
     Default = 1,
 })
 
 EquipBox:AddInput("EquipSearch", {
-    Text = "搜尋",
+    Text = T("搜尋"),
     Default = "",
     Finished = true,
-    Placeholder = "關鍵字後按 Enter",
+    Placeholder = T("關鍵字後按 Enter"),
 })
 
 EquipBox:AddDropdown("EquipCosmetic", {
-    Text = "外觀",
+    Text = T("外觀"),
     Values = { "None", "Random" },
     Default = 1,
-    Tooltip = "None = 卸下，Random = 每次生成隨機挑一個",
+    Tooltip = T("None = 卸下，Random = 每次生成隨機挑一個"),
 })
 
-local EquipCountLabel = EquipBox:AddLabel("清單：--")
+local EquipCountLabel = EquipBox:AddLabel(T("清單：--"))
 
 EquipBox:AddToggle("EquipInverted", {
-    Text = "包裝反轉 (Inverted)",
+    Text = T("包裝反轉 (Inverted)"),
     Default = false,
 })
 
 EquipBox:AddToggle("EquipFavoritesOnly", {
-    Text = "Random 只從最愛裡挑",
+    Text = T("Random 只從最愛裡挑"),
     Default = false,
 })
 
-EquipBox:AddButton({
-    Text = "套用",
+AddBtn(AddBtn(EquipBox, {
+    Text = T("套用"),
     Func = function()
         local ok, err = EquipApply(
             state.equip.weapon,
@@ -1513,10 +1805,11 @@ EquipBox:AddButton({
             state.equip.inverted,
             state.equip.favorites_only
         )
-        Library:Notify(ok and ("已套用到 " .. state.equip.weapon) or ("失敗：" .. tostring(err)), 5)
+        Library:Notify(ok and T("已套用到 %s"):format(state.equip.weapon)
+            or T("失敗：%s"):format(tostring(err)), 5)
     end,
-}):AddButton({
-    Text = "套用到所有武器",
+}), {
+    Text = T("套用到所有武器"),
     Func = function()
         local ok, result = EquipApplyAll(
             state.equip.type,
@@ -1524,32 +1817,33 @@ EquipBox:AddButton({
             state.equip.inverted,
             state.equip.favorites_only
         )
-        Library:Notify(ok and ("已套用到 %d 把武器"):format(result) or ("失敗：" .. tostring(result)), 5)
+        Library:Notify(ok and T("已套用到 %d 把武器"):format(result)
+            or T("失敗：%s"):format(tostring(result)), 5)
     end,
 })
 
-EquipBox:AddButton({
-    Text = "卸下這把武器的這個欄位",
+AddBtn(EquipBox, {
+    Text = T("卸下這把武器的這個欄位"),
     Func = function()
         EquipApply(state.equip.weapon, state.equip.type, "None", false, false)
-        Library:Notify(("%s 的 %s 已卸下"):format(state.equip.weapon, state.equip.type), 5)
+        Library:Notify(T("%s 的 %s 已卸下"):format(state.equip.weapon, state.equip.type), 5)
     end,
 })
 
-local EquippedBox = Tabs.Equip:AddRightGroupbox("目前本地裝備")
-local EquippedLabel = EquippedBox:AddLabel("（空）", true)
+local EquippedBox = Tabs.Equip:AddRightGroupbox(T("目前本地裝備"))
+local EquippedLabel = EquippedBox:AddLabel(T("（空）"), true)
 
-EquippedBox:AddButton({
-    Text = "全部清空",
+AddBtn(EquippedBox, {
+    Text = T("全部清空"),
     DoubleClick = true,
     Func = function()
         table.clear(state.equipped)
-        Library:Notify("本地裝備已清空，重生一次就會恢復原樣", 5)
+        Library:Notify(T("本地裝備已清空，重生一次就會恢復原樣"), 5)
     end,
 })
 
 --=============================================================================
--- 14. 清單刷新
+-- 15. 清單刷新
 --=============================================================================
 
 local function ApplyDropdownValues(dropdown, values, fallback)
@@ -1578,8 +1872,8 @@ local function RefreshSpecCosmetics()
     ApplyDropdownValues(Options.SpecCosmetic, values, "")
 
     SpecCountLabel:SetText(total > shown
-        and ("清單：顯示 %d / 符合 %d（用搜尋縮小範圍）"):format(shown, total)
-        or ("清單：%d 個"):format(total))
+        and T("清單：顯示 %d / 符合 %d（用搜尋縮小範圍）"):format(shown, total)
+        or T("清單：%d 個"):format(total))
 end
 
 local function RefreshEquipCosmetics()
@@ -1594,12 +1888,12 @@ local function RefreshEquipCosmetics()
     ApplyDropdownValues(Options.EquipCosmetic, values, "None")
 
     EquipCountLabel:SetText(total > shown
-        and ("清單：顯示 %d / 符合 %d（用搜尋縮小範圍）"):format(shown, total)
-        or ("清單：%d 個"):format(total))
+        and T("清單：顯示 %d / 符合 %d（用搜尋縮小範圍）"):format(shown, total)
+        or T("清單：%d 個"):format(total))
 end
 
 --=============================================================================
--- 15. UI 事件接線
+-- 16. UI 事件接線
 --=============================================================================
 
 state.unlocker.search = ""
@@ -1633,7 +1927,7 @@ Toggles.AutoUnlock:OnChanged(function()
         local cosmetics = UnlockAllCosmetics(true)
         local weapons = UnlockAllWeapons()
         if cosmetics > 0 or weapons > 0 then
-            Library:Notify(("自動解鎖：%d 個外觀、%d 把武器"):format(cosmetics, weapons), 5)
+            Library:Notify(T("自動解鎖：%d 個外觀、%d 把武器"):format(cosmetics, weapons), 5)
         end
     end
 end)
@@ -1670,7 +1964,7 @@ Toggles.EquipFavoritesOnly:OnChanged(function()
 end)
 
 --=============================================================================
--- 16. 狀態面板
+-- 17. 狀態面板
 --=============================================================================
 
 local function CountKeys(t)
@@ -1697,12 +1991,12 @@ local function DescribeEquipped()
     table.sort(lines)
 
     if #lines == 0 then
-        return "（空）"
+        return T("（空）")
     end
 
     if #lines > 12 then
         local trimmed = table.move(lines, 1, 12, 1, {})
-        table.insert(trimmed, ("...還有 %d 把"):format(#lines - 12))
+        table.insert(trimmed, T("...還有 %d 把"):format(#lines - 12))
         lines = trimmed
     end
 
@@ -1712,15 +2006,12 @@ end
 task.spawn(function()
     while not state.unloaded and not Library.Unloaded do
         pcall(function()
-            StatusLabel:SetText(([[本腳本解鎖：%d 個外觀 · %d 把武器
-背包外觀總數：%d
-本地裝備：%d 把武器
-Equip 攔截：%s]]):format(
+            StatusLabel:SetText(T(STATUS_SOURCE):format(
                 CountKeys(state.injected),
                 #state.fake_weapon_owned,
                 CountKeys(state.fake_owned),
                 CountKeys(state.equipped),
-                state.intercept_equip and "開啟" or "關閉"
+                state.intercept_equip and T("開啟") or T("關閉")
             ))
 
             EquippedLabel:SetText(DescribeEquipped())
@@ -1731,30 +2022,39 @@ Equip 攔截：%s]]):format(
 end)
 
 --=============================================================================
--- 17. Settings 分頁 + 卸載
+-- 18. Settings 分頁
 --=============================================================================
 
-local MenuBox = Tabs.Settings:AddLeftGroupbox("選單")
+local MenuBox = Tabs.Settings:AddLeftGroupbox(T("選單"))
 
-MenuBox:AddButton({
-    Text = "卸載腳本",
+local LanguageButton = MenuBox:AddButton({
+    Text = "語言 / Language：中文",
+    Func = function()
+        SetLanguage(i18n.lang == "zh" and "en" or "zh")
+    end,
+})
+
+MenuBox:AddDivider()
+
+AddBtn(MenuBox, {
+    Text = T("卸載腳本"),
     DoubleClick = true,
-    Tooltip = "還原所有 hook 並關閉 UI（要點兩下）",
+    Tooltip = T("還原所有 hook 並關閉 UI（要點兩下）"),
     Func = function()
         Library:Unload()
     end,
 })
 
-MenuBox:AddLabel("開關選單"):AddKeyPicker("MenuKeybind", {
+MenuBox:AddLabel(T("開關選單")):AddKeyPicker("MenuKeybind", {
     Default = "End",
     NoUI = true,
-    Text = "選單快捷鍵",
+    Text = T("選單快捷鍵"),
 })
 
 Library.ToggleKeybind = Options.MenuKeybind
 
 MenuBox:AddToggle("ShowWatermark", {
-    Text = "顯示浮水印",
+    Text = T("顯示浮水印"),
     Default = true,
 })
 
@@ -1764,15 +2064,85 @@ end)
 
 Library:SetWatermark("Rivals · Skin Changer")
 
-local InfoBox = Tabs.Settings:AddRightGroupbox("說明")
-InfoBox:AddLabel(
-    "解鎖與裝備都只存在你自己的客戶端，伺服器看不到，也不會存檔。\n" ..
-    "重新進遊戲要再跑一次腳本。\n\n" ..
-    "外觀沒出現的話：切換一次武器讓 ViewModel 重建。",
-    true
-)
+local InfoBox = Tabs.Settings:AddRightGroupbox(T("說明"))
+local InfoLabel = InfoBox:AddLabel(T(INFO_SOURCE), true)
 
---------------------------------------------------------------------- 還原 hook
+--=============================================================================
+-- 19. 語言切換
+--=============================================================================
+
+function SetLanguage(lang)
+    if lang ~= "zh" and lang ~= "en" then return end
+    if i18n.lang == lang then return end
+
+    i18n.lang = lang
+
+    -- 一般靜態文字（標籤 / 按鈕 / 提示 / 佔位字），照建立時記下的清單原地改字
+    for _, item in ipairs(i18n.tracked) do
+        if item.inst and item.inst.Parent then
+            local translated = T(item.key)
+            item.last = translated
+            item.inst[item.prop] = translated
+
+            if item.tooltip then
+                -- 提示框大小是照文字寬度算的，換字後要重算
+                local x, y = Library:GetTextBounds(translated, Library.Font, 14)
+                local tooltip_frame = item.inst.Parent
+                if tooltip_frame then
+                    tooltip_frame.Size = UDim2.fromOffset(x + 5, y + 4)
+                end
+            elseif item.tab_button then
+                -- 分頁按鈕的寬度也是照文字算的
+                local x = Library:GetTextBounds(translated, Library.Font, 16)
+                local tab_frame = item.inst.Parent
+                if tab_frame then
+                    tab_frame.Size = UDim2.new(0, x + 8 + 4, 1, 0)
+                end
+            end
+        end
+    end
+
+    for _, item in ipairs(i18n.buttons) do
+        local translated = T(item.key)
+        item.button.Text = translated
+        if item.button.Label then
+            item.button.Label.Text = translated
+        end
+    end
+
+    -- 這幾個是動態內容（含 %d/%s，或被背景迴圈持續覆寫），
+    -- 不能只靠上面那份清單，語言切換當下要手動重算一次
+    pcall(function() InfoLabel:SetText(T(INFO_SOURCE)) end)
+    pcall(RefreshSpecCosmetics)
+    pcall(RefreshEquipCosmetics)
+    pcall(function()
+        StatusLabel:SetText(T(STATUS_SOURCE):format(
+            CountKeys(state.injected),
+            #state.fake_weapon_owned,
+            CountKeys(state.fake_owned),
+            CountKeys(state.equipped),
+            state.intercept_equip and T("開啟") or T("關閉")
+        ))
+        EquippedLabel:SetText(DescribeEquipped())
+    end)
+
+    LanguageButton.Text = "語言 / Language：" .. (lang == "zh" and "中文" or "English")
+    if LanguageButton.Label then
+        LanguageButton.Label.Text = LanguageButton.Text
+    end
+
+    SaveLanguage()
+
+    Library:Notify(lang == "zh" and "已切換為中文" or "Switched to English", 3)
+end
+
+-- UI 是照 i18n.lang 當下的語言建出來的（預設中文，或讀到存檔的語言），
+-- 這裡不用再呼叫一次 SetLanguage，上面建 UI 時已經是對的語言了。
+
+--=============================================================================
+-- 20. 還原 hook
+--=============================================================================
+
 local unloading = false
 
 local function TeardownHooks()
@@ -1839,7 +2209,7 @@ Library:OnUnload(function()
 end)
 
 --=============================================================================
--- 18. 設定檔 / 主題
+-- 21. 設定檔 / 主題
 --=============================================================================
 
 ThemeManager:SetLibrary(Library)
@@ -1854,6 +2224,10 @@ SaveManager:SetFolder("RivalsSkinChanger/configs")
 SaveManager:BuildConfigSection(Tabs.Settings)
 ThemeManager:ApplyToTab(Tabs.Settings)
 
+-- 擺在 Configuration 下面那塊空位，剛好卡進右下角
+local CreditsBox = Tabs.Settings:AddRightGroupbox(T("作者"))
+CreditsBox:AddLabel(CREDITS_TEXT, true)
+
 pcall(function() SaveManager:LoadAutoloadConfig() end)
 
-Library:Notify("Rivals Skin Changer 載入完成 · 按 End 開關選單", 6)
+Library:Notify(T("Rivals Skin Changer 載入完成 · 按 End 開關選單"), 6)
