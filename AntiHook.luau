@@ -62,14 +62,22 @@ local function CandidateGlobals()
         newcclosure        = newcclosure,
         checkcaller        = checkcaller,
         getnamecallmethod  = getnamecallmethod,
-        loadstring         = loadstring,
         request            = (type(request) == "function" and request)
             or (type(http) == "table" and http.request),
-        -- 注意：require 故意沒放進來。實測過 Real 執行器 + RIVALS 這個組合，
-        -- 乾淨環境下 iscclosure(require) 本來就回傳 false（require 天生是
-        -- Lua 實作，不是 C closure），放進來只會製造保證會觸發的假警報。
-        -- 這是實測結果，不是猜測——想加回來之前，先在你自己的環境測過
-        -- 乾淨基準值，不要直接信任何清單。
+        -- 注意：require 跟 loadstring 都故意沒放進來，理由不一樣：
+        --
+        -- require：實測過 Real 執行器 + RIVALS 這個組合，乾淨環境下
+        -- iscclosure(require) 本來就回傳 false（require 天生是 Lua 實作，
+        -- 不是 C closure），放進來保證誤報，這是實測結果不是猜測。
+        --
+        -- loadstring：使用者實際回報過在他自己的執行器上乾淨環境也會誤報
+        -- （不同執行器對 loadstring 的實作方式不一致），而且就算真的被
+        -- hookfunction 動過手腳，這項檢查在 Real 上也證實測不出來（隱蔽型
+        -- hook）——也就是它唯一抓得到的情境（沒包裝的粗糙 hook）本來就很
+        -- 少見，卻會在不同執行器上一直誤報，CP 值不划算，直接拿掉。
+        --
+        -- 兩個都一樣：想加回來之前，先在你自己的環境測過乾淨基準值，
+        -- 不要直接信任何清單。
     }
 end
 
