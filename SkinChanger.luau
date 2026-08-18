@@ -27,6 +27,186 @@ if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
+--=============================================================================
+-- 0.5 反 Hook 偵測 + HWID 授權檢查
+--
+--  這一段一定要放在整份腳本最前面、在我們自己呼叫任何 hookmetamethod /
+--  newcclosure 之前跑——不然等一下 Equip 功能自己去 hook __namecall 時，
+--  下面的檢查會把「自己」也算成可疑對象，變成自己抓自己。
+--
+--  順序：
+--    1. 掃描目前環境有沒有被動過手腳的痕跡（跟 AntiHook.luau 是同一套邏輯，
+--       內嵌一份在這裡是為了維持「整份貼上就能跑」，不需要額外下載檔案）
+--    2. 不管掃描結果，先問 Worker「這個 HWID 有沒有已經被封鎖」
+--    3. 已經被封鎖 → 直接中止，後面的程式碼完全不會執行
+--    4. 掃描到 hook 痕跡 → 回報給 Worker 把這個 HWID 封鎖，然後中止
+--
+--  ⚠️ 老實話：這擋不住「執行器本身」想在你的程式碼開始跑之前動手腳——那個
+--  時間點你的程式碼根本還沒開始執行，沒辦法防，這是整個外掛圈的共同限制。
+--  這裡做的是把「已經動過手腳」的常見痕跡找出來，形成嚇阻，不是絕對安全。
+--
+--  ⚠️ iscclosure 這招在少數執行器上可能有誤判（某些原生功能本來就是用 Lua
+--  實作，不是 hook 造成的）。第一次啟用時強烈建議把下面的 ANTIHOOK_DRY_RUN
+--  留著 true，看 output 有沒有噴出不該有的 reasons，確認乾淨了再改成 false
+--  正式啟用封鎖，並且務必把 hwid-ban-worker/HWID_BAN_SETUP.md 裡教的
+--  /unban 端點記起來，之後有人誤判才有辦法救回來。
+--=============================================================================
+
+-- 部署好 Worker 之後把這兩個值換掉：
+-- LICENSE_API 換成你的 Worker 網址（不要有結尾斜線）
+-- REPORT_SECRET 要跟 hwid-ban-worker/worker.js 裡的 BAN_SECRET 完全一樣
+local LICENSE_API = "https://skinchanger-hwid.smallvmware.workers.dev"
+local REPORT_SECRET = "a07e18c7510588f04dea5774077d7d434bdcc864c3a1f1e4"
+
+-- 部署好之前先別擋人，設 true 的話下面兩個網路檢查都會直接跳過（視同放行），
+-- 只會印警告，不會擋任何人。部署完 Worker、填好上面兩個值之後記得改回 false。
+local LICENSE_GATE_ENABLED = true
+
+-- 見上面說明：第一次正式啟用封鎖前，先留 true 觀察有沒有誤判。
+local ANTIHOOK_DRY_RUN = true
+
+local function ScanForHooks()
+    local reasons = {}
+
+    if type(iscclosure) == "function" then
+        local candidates = {
+            hookfunction       = hookfunction,
+            hookmetamethod     = hookmetamethod,
+            getrawmetatable    = getrawmetatable,
+            setrawmetatable    = setrawmetatable,
+            newcclosure        = newcclosure,
+            checkcaller        = checkcaller,
+            getnamecallmethod  = getnamecallmethod,
+            loadstring         = loadstring,
+            request            = (type(request) == "function" and request)
+                or (type(http) == "table" and http.request),
+        }
+
+        for name, fn in pairs(candidates) do
+            if type(fn) == "function" then
+                local ok, is_native = pcall(iscclosure, fn)
+                if ok and is_native == false then
+                    table.insert(reasons, "global:" .. name)
+                end
+            end
+        end
+
+        local ok, mt = pcall(getrawmetatable, game)
+        if ok and type(mt) == "table" then
+            for _, key in ipairs({ "__namecall", "__index", "__newindex" }) do
+                local meta_fn = mt[key]
+                if type(meta_fn) == "function" then
+                    local ok2, is_native = pcall(iscclosure, meta_fn)
+                    if ok2 and is_native == false then
+                        table.insert(reasons, "metamethod:" .. key)
+                    end
+                end
+            end
+        end
+    end
+
+    local KNOWN_DUMPER_MARKERS = { "__DUMPER__", "___dump___", "SourceGrabber", "ScriptDumper" }
+    local ok, env = pcall(getgenv)
+    if ok and type(env) == "table" then
+        for _, marker in ipairs(KNOWN_DUMPER_MARKERS) do
+            if env[marker] ~= nil then
+                table.insert(reasons, "marker:" .. marker)
+            end
+        end
+    end
+
+    return reasons
+end
+
+-- 各執行器提供 HWID 的函式名稱不統一，依序試過去；都沒有的話退而求其次
+-- 用 Roblox 自己的 client id（清快取/重灌會變，準確度較低，但至少有得用）。
+local function GetHWID()
+    for _, fn_name in ipairs({ "gethwid", "get_hwid", "GetHWID" }) do
+        local fn = _G[fn_name]
+        if type(fn) == "function" then
+            local ok, id = pcall(fn)
+            if ok and type(id) == "string" and id ~= "" then
+                return id
+            end
+        end
+    end
+
+    local ok, id = pcall(function()
+        return game:GetService("RbxAnalyticsService"):GetClientId()
+    end)
+    if ok and type(id) == "string" and id ~= "" then
+        return "rbx:" .. id
+    end
+
+    local ok2, uid = pcall(function()
+        return game:GetService("Players").LocalPlayer.UserId
+    end)
+
+    return "unknown:" .. tostring(ok2 and uid or "0")
+end
+
+local function HttpGetJSON(url)
+    local ok, body = pcall(game.HttpGet, game, url)
+    if not ok or type(body) ~= "string" then return nil end
+
+    local ok2, decoded = pcall(function()
+        return game:GetService("HttpService"):JSONDecode(body)
+    end)
+
+    return ok2 and decoded or nil
+end
+
+local function HttpPostJSON(url, payload)
+    local ok, response = pcall(function()
+        return request({
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = game:GetService("HttpService"):JSONEncode(payload),
+        })
+    end)
+
+    if not ok or not response or not response.Body then return nil end
+
+    local ok2, decoded = pcall(function()
+        return game:GetService("HttpService"):JSONDecode(response.Body)
+    end)
+
+    return ok2 and decoded or nil
+end
+
+if LICENSE_GATE_ENABLED then
+    local hwid = GetHWID()
+    local hook_reasons = ScanForHooks()
+
+    local status = HttpGetJSON(LICENSE_API .. "/check?hwid="
+        .. game:GetService("HttpService"):UrlEncode(hwid))
+
+    if status and status.banned then
+        return warn("[SkinChanger] 這個裝置已被封鎖"
+            .. (status.reason and (("：" .. status.reason)) or "")
+            .. "。如果你覺得是誤判，請聯絡作者處理。")
+    end
+
+    if #hook_reasons > 0 then
+        local reason_text = table.concat(hook_reasons, ", ")
+
+        if ANTIHOOK_DRY_RUN then
+            warn("[SkinChanger] (dry-run，尚未封鎖) 偵測到疑似 hook 痕跡：" .. reason_text)
+        else
+            pcall(HttpPostJSON, LICENSE_API .. "/report", {
+                hwid = hwid,
+                secret = REPORT_SECRET,
+                reason = reason_text,
+            })
+
+            return warn("[SkinChanger] 偵測到執行環境異常（" .. reason_text
+                .. "），已中止載入並回報。如果你確定沒有掛任何 hook 工具，"
+                .. "這可能是誤判，請聯絡作者解除封鎖。")
+        end
+    end
+end
+
 local genv = (getgenv and getgenv()) or _G
 
 if genv.__RIVALS_SKINCHANGER then
@@ -1519,7 +1699,7 @@ i18n.capture = true
 
 local INFO_SOURCE = "解鎖與裝備都只存在你自己的客戶端，伺服器看不到，也不會存檔。\n重新進遊戲要再跑一次腳本。\n\n外觀沒出現的話：切換一次武器讓 ViewModel 重建。"
 local STATUS_SOURCE = "本腳本解鎖：%d 個外觀 · %d 把武器\n背包外觀總數：%d\n本地裝備：%d 把武器\nEquip 攔截：%s"
-local CREDITS_TEXT = "asphy¢ 、your dad:xxxx\n\nEEZ rebuild"
+local CREDITS_TEXT = "asphy¢ 、your dad:smallhuang\n\nSB林承恩，沒想到這裡也有我吧"
 
 local Window = Library:CreateWindow({
     Title = "Rivals · Skin Changer",
