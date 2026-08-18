@@ -1,11 +1,10 @@
 --[[
     Rivals · Skin Changer — 一行式載入器
 
-    用法：把 REPO_BASE 換成你自己的 GitHub raw 網址，然後在執行器貼這整份，
-    或直接貼下面那一行 loadstring。
+    在執行器貼這整份，或直接貼最下面那一行 loadstring 就好。
 ]]
 
-local REPO_BASE = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/"
+local REPO_BASE = "https://raw.githubusercontent.com/smallhuang100/skinchanger/main/"
 
 local url = REPO_BASE .. "SkinChanger.luau?r=" .. tostring(math.random(1, 1e9))
 
@@ -22,7 +21,7 @@ end
 chunk()
 
 --[[
-    等 repo 建好之後，平常只要貼這一行就好：
+    平常只要貼這一行：
 
-    loadstring(game:HttpGet("https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/SkinChanger.luau"))()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/smallhuang100/skinchanger/main/SkinChanger.luau"))()
 ]]

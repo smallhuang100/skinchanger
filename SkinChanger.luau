@@ -44,8 +44,26 @@ local cloneref = cloneref or function(o) return o end
 -- 1. 載入 UI 函式庫（UELinoriaLib）
 --=============================================================================
 
-local UI_REPO = "https://raw.githubusercontent.com/pandaeatdonuts-byte/UELinoriaLib/main/"
+-- 依序嘗試。自己的 repo 擺第一，上游擺備援：
+-- 上游哪天被刪掉腳本還是開得起來，自己的 repo 掛了也還有救。
+local UI_REPOS = {
+    "https://raw.githubusercontent.com/smallhuang100/skinchanger/main/lib/",
+    "https://raw.githubusercontent.com/pandaeatdonuts-byte/UELinoriaLib/main/",
+}
+
 local UI_LOCAL_FOLDER = "RivalsSkinChanger/lib/" -- 執行器 workspace 底下
+
+local function TryChunk(source, path)
+    if type(source) ~= "string" or #source == 0 then return nil end
+
+    local chunk = loadstring(source, "@" .. path)
+    if not chunk then return nil end
+
+    local ok, result = pcall(chunk)
+    if ok and result then return result end
+
+    return nil
+end
 
 local function LoadUIModule(path)
     -- 本地優先：把 lib/ 丟進 <executor>/workspace/RivalsSkinChanger/lib/ 就不用連網
@@ -54,29 +72,31 @@ local function LoadUIModule(path)
         local ok, exists = pcall(isfile, local_path)
         if ok and exists then
             local ok2, source = pcall(readfile, local_path)
-            if ok2 and type(source) == "string" and #source > 0 then
-                local chunk = loadstring(source, "@" .. path)
-                if chunk then
-                    local ok3, result = pcall(chunk)
-                    if ok3 and result then return result end
-                end
+            if ok2 then
+                local result = TryChunk(source, path)
+                if result then return result end
                 warn("[SkinChanger] 本地 " .. path .. " 載入失敗，改用遠端。")
             end
         end
     end
 
-    -- 加隨機參數繞過 raw.githubusercontent 的快取
-    local url = UI_REPO .. path .. "?r=" .. tostring(math.random(1, 1e9))
-    local ok, source = pcall(game.HttpGet, game, url)
-    assert(ok and type(source) == "string" and #source > 0,
-        ("[SkinChanger] 下載 %s 失敗：%s"):format(path, tostring(source)))
+    local last_error = "沒有可用的來源"
 
-    local chunk, err = loadstring(source, "@" .. path)
-    assert(chunk, ("[SkinChanger] 編譯 %s 失敗：%s"):format(path, tostring(err)))
+    for _, base in ipairs(UI_REPOS) do
+        -- 加隨機參數繞過 raw.githubusercontent 的快取
+        local url = base .. path .. "?r=" .. tostring(math.random(1, 1e9))
+        local ok, source = pcall(game.HttpGet, game, url)
 
-    local result = chunk()
-    assert(result, ("[SkinChanger] %s 沒有回傳函式庫表"):format(path))
-    return result
+        if ok then
+            local result = TryChunk(source, path)
+            if result then return result end
+            last_error = ("%s 抓得到但內容壞掉（可能被截斷）"):format(base)
+        else
+            last_error = tostring(source)
+        end
+    end
+
+    error(("[SkinChanger] 載入 %s 失敗：%s"):format(path, last_error), 0)
 end
 
 local Library      = LoadUIModule("Library.lua")
